@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Data and downloaded datasets (fetched at run time, never committed)
+/data/
+PlantVillage-Dataset/
+PlantDoc-Dataset/
+
+# Model weights and run outputs (too large for git; publish weights as a Release if needed)
+*.pt
+*.pth
+*.ckpt
+*.onnx
+/runs/
+/report/
+/wandb/
+
+# Archives and scratch notebooks
+*.zip
+Untitled*.ipynb
+
+# Secrets
+kaggle.json
+.env
+
+# OS
+.DS_Store
+Thumbs.db
