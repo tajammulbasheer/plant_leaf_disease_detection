@@ -99,13 +99,18 @@ Click the **Open in Colab** badge above, select a T4 GPU, and run the cells top 
 clones this repo itself. See **[docs/COLAB.md](docs/COLAB.md)** for the full walkthrough. No API keys or
 accounts are needed beyond Google Drive.
 
+Prefer your own GPU? **[docs/LOCAL.md](docs/LOCAL.md)** covers the same pipeline locally (WSL2 / Linux).
+
 ### Local
+
+For a full local run on a CUDA GPU (one script, resumable, logs per step), see
+**[docs/LOCAL.md](docs/LOCAL.md)** and `scripts/run_all.sh`. Step by step:
 
 ```bash
 git clone https://github.com/tajammulbasheer/plant_leaf_disease_detection.git
 cd plant_leaf_disease_detection
 pip install -r requirements.txt
-python -m src.data.prepare_plantvillage --output-dir data --cleanup-clone
+python -m src.data.prepare_plantvillage --output-dir data --workdir . --cleanup-clone
 
 python -m src.training.train_classifier --data-dir data/plantvillage_full \
     --output-dir runs/baseline_full --mode full --epochs 20
@@ -144,7 +149,10 @@ src/
     metrics.py                 accuracy, macro-F1 / precision / recall
     generate_report.py         results tables, figures, README update
 notebooks/train_on_colab.ipynb  Colab runner (calls the scripts above)
+scripts/run_all.sh              local runner: same steps and settings as the notebook
+scripts/smoke_test.sh           end-to-end check of every script on tiny synthetic data
 docs/COLAB.md                   step-by-step Colab guide
+docs/LOCAL.md                   local GPU guide (setup, tmux, resuming, troubleshooting)
 assets/                         figures used in this README
 ```
 
