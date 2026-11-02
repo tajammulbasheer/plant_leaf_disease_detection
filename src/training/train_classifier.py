@@ -13,6 +13,8 @@ Outputs written to --output-dir (updated after EVERY epoch, so an
 interrupted run keeps its progress; re-run with --resume to continue):
   history.json      per-epoch train loss, val accuracy / macro-F1 / P / R
   best_model.pt     weights of the best epoch by val macro-F1
+  last_checkpoint.pt  model + optimizer + scheduler + RNG state of the latest
+                    epoch; --resume continues from it exactly
   best_epoch.json   which epoch that was
   classes.json      class names, in label-index order
   config.json       the exact arguments used for the run
@@ -27,7 +29,10 @@ Example (Colab):
 import argparse
 import json
 import os
+import random
 from pathlib import Path
+
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -168,8 +173,35 @@ def train(args):
 
     history, best_f1, start_epoch = [], 0.0, 0
     history_path, ckpt_path = out_dir / "history.json", out_dir / "best_model.pt"
+    last_path = out_dir / "last_checkpoint.pt"
 
-    if args.resume and history_path.exists() and ckpt_path.exists():
+    if args.resume and last_path.exists() and history_path.exists():
+        # Exact resume: weights, optimizer, scheduler and RNG state of the
+        # last finished epoch. Loaded on CPU because the RNG states must stay
+        # CPU tensors; load_state_dict moves the rest to the model's device.
+        state = torch.load(last_path, map_location="cpu", weights_only=False)
+        history = json.loads(history_path.read_text())[: state["epoch"]]
+        model.load_state_dict(state["model"])
+        optimizer.load_state_dict(state["optimizer"])
+        scheduler.load_state_dict(state["scheduler"])
+        # Keep the schedule length of *this* invocation if --epochs changed
+        # (as the best_model.pt path below does); no-op otherwise.
+        scheduler.T_max = args.epochs
+        torch.set_rng_state(state["rng"]["torch"])
+        if torch.cuda.is_available() and state["rng"].get("cuda") is not None:
+            torch.cuda.set_rng_state_all(state["rng"]["cuda"])
+        random.setstate(state["rng"]["python"])
+        np.random.set_state(state["rng"]["numpy"])
+        best_f1 = max((h["macro_f1"] for h in history), default=0.0)
+        start_epoch = state["epoch"]
+        print(f"Resuming from last_checkpoint.pt: {start_epoch} epoch(s) done, "
+              f"best macro-F1 so far {best_f1:.4f}.")
+        if start_epoch >= args.epochs:
+            print("Run already complete -- nothing to do.")
+            return
+    elif args.resume and history_path.exists() and ckpt_path.exists():
+        # Runs made before last_checkpoint.pt existed: continue from the best
+        # epoch's weights with a fresh optimizer (approximate resume).
         history = json.loads(history_path.read_text())
         model.load_state_dict(torch.load(ckpt_path, map_location=device))
         best_f1 = max((h["macro_f1"] for h in history), default=0.0)
@@ -180,6 +212,7 @@ def train(args):
         if start_epoch >= args.epochs:
             print("Run already complete -- nothing to do.")
             return
+        print("  (no last_checkpoint.pt: continuing from best-epoch weights with a fresh optimizer)")
     elif args.resume:
         print("--resume set, but no previous run found here -- starting fresh.")
 
@@ -213,6 +246,21 @@ def train(args):
             (out_dir / "best_epoch.json").write_text(
                 json.dumps({"epoch": epoch + 1, "macro_f1": best_f1}, indent=2)
             )
+        # Written to a temp file then renamed, so a kill mid-save can't
+        # leave a truncated checkpoint behind.
+        torch.save({
+            "epoch": epoch + 1,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "rng": {
+                "torch": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                "python": random.getstate(),
+                "numpy": np.random.get_state(),
+            },
+        }, last_path.with_suffix(".tmp"))
+        os.replace(last_path.with_suffix(".tmp"), last_path)
 
     print(f"Done. Best val macro-F1: {best_f1:.4f}. Outputs in {out_dir}")
 
@@ -236,7 +284,8 @@ def parse_args():
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--resume", action="store_true",
-                   help="Continue from history.json/best_model.pt in --output-dir if present")
+                   help="Continue from last_checkpoint.pt in --output-dir if present "
+                        "(older runs without it: from best_model.pt)")
     return p.parse_args()
 
 
