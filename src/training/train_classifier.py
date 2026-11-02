@@ -136,15 +136,24 @@ def select_pseudo_labels(model, unlabeled_ds, device, args):
     return selected, limit
 
 
-def run_epoch(model, loader, criterion, optimizer, device, desc):
+def run_epoch(model, loader, criterion, optimizer, device, desc, scaler=None):
+    """One pass over `loader`. With a GradScaler, forward runs under fp16
+    autocast (--amp); without one, plain fp32 exactly as before."""
     model.train()
     total_loss, total = 0.0, 0
     for images, labels in tqdm(loader, desc=desc, leave=False):
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
-        loss = criterion(model(images), labels)
-        loss.backward()
-        optimizer.step()
+        if scaler is None:
+            loss = criterion(model(images), labels)
+            loss.backward()
+            optimizer.step()
+        else:
+            with torch.autocast(device_type=device.type, dtype=torch.float16):
+                loss = criterion(model(images), labels)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
         total_loss += loss.item() * images.size(0)
         total += images.size(0)
     return total_loss / max(total, 1)
@@ -165,6 +174,9 @@ def train(args):
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    scaler = torch.amp.GradScaler(device.type) if args.amp else None
+    if args.amp:
+        print("Mixed precision (AMP, fp16 autocast) enabled for training steps.")
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -187,6 +199,8 @@ def train(args):
         # Keep the schedule length of *this* invocation if --epochs changed
         # (as the best_model.pt path below does); no-op otherwise.
         scheduler.T_max = args.epochs
+        if scaler is not None and state.get("scaler"):
+            scaler.load_state_dict(state["scaler"])
         torch.set_rng_state(state["rng"]["torch"])
         if torch.cuda.is_available() and state["rng"].get("cuda") is not None:
             torch.cuda.set_rng_state_all(state["rng"]["cuda"])
@@ -218,7 +232,7 @@ def train(args):
 
     for epoch in range(start_epoch, args.epochs):
         tag = f"Epoch {epoch + 1}/{args.epochs}"
-        train_loss = run_epoch(model, train_loader, criterion, optimizer, device, tag)
+        train_loss = run_epoch(model, train_loader, criterion, optimizer, device, tag, scaler)
         n_pseudo = 0
 
         if args.mode == "semi_supervised" and epoch >= args.warmup_epochs:
@@ -229,7 +243,7 @@ def train(args):
                     PathListDataset(selected, default_transforms(train=True, image_size=args.image_size)),
                     batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                 )
-                run_epoch(model, pseudo_loader, criterion, optimizer, device, f"{tag} [pseudo]")
+                run_epoch(model, pseudo_loader, criterion, optimizer, device, f"{tag} [pseudo]", scaler)
             print(f"  pseudo-labels: {n_pseudo}/{scanned} above confidence {args.confidence_threshold}")
 
         scheduler.step()
@@ -253,6 +267,7 @@ def train(args):
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
+            "scaler": scaler.state_dict() if scaler is not None else None,
             "rng": {
                 "torch": torch.get_rng_state(),
                 "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -286,6 +301,9 @@ def parse_args():
     p.add_argument("--resume", action="store_true",
                    help="Continue from last_checkpoint.pt in --output-dir if present "
                         "(older runs without it: from best_model.pt)")
+    p.add_argument("--amp", action="store_true",
+                   help="Mixed-precision (fp16 autocast + GradScaler) training steps. Off by default; "
+                        "validation and pseudo-label scoring always run in fp32")
     return p.parse_args()
 
 

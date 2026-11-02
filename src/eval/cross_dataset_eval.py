@@ -72,7 +72,7 @@ def run(args):
         root=args.plantvillage_val_dir,
         transform=default_transforms(train=False, image_size=args.image_size),
     )
-    pv_loader = DataLoader(pv_ds, batch_size=args.batch_size, shuffle=False)
+    pv_loader = DataLoader(pv_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     pv_metrics = evaluate_classifier(model, pv_loader, device, APPLE_CLASSES)
     plot_confusion(
         model, pv_loader, device, APPLE_CLASSES,
@@ -86,7 +86,7 @@ def run(args):
         transform=default_transforms(train=False, image_size=args.image_size),
     )
     print(pd_ds.missing_classes_note)
-    pd_loader = DataLoader(pd_ds, batch_size=args.batch_size, shuffle=False)
+    pd_loader = DataLoader(pd_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     pd_metrics = evaluate_classifier(model, pd_loader, device, APPLE_CLASSES)
     plot_confusion(
         model, pd_loader, device, APPLE_CLASSES,
@@ -117,6 +117,7 @@ def parse_args():
     p.add_argument("--backbone", default="efficientnet_b0")
     p.add_argument("--image-size", type=int, default=224)
     p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--num-workers", type=int, default=0)
     return p.parse_args()
 
 

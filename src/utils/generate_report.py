@@ -241,6 +241,26 @@ def samples_section(run_dir, assets, figs):
         figs.append((f"gradcam_{i}.png", f"Grad-CAM heatmap and pseudo bounding box ({c.stem})"))
 
 
+def precision_note(run_dir):
+    """Which runs trained with --amp. A run whose outputs carry no "amp"
+    field predates the flag, and that code only trained in fp32."""
+    runs = [(folder, load_json(run_dir / folder / "config.json"))
+            for _, folder, _, _ in CLASSIFIER_RUNS + [("", "baseline_apple_only", "", "")]]
+    runs.append(("unet", load_json(run_dir / "unet" / "seg_results.json")))
+    inc = load_json(run_dir / "incremental" / "incremental_results.json")
+    runs.append(("incremental", (inc or {}).get("config", {}) if inc else None))
+    amp = [name for name, cfg in runs if cfg is not None and cfg.get("amp")]
+    fp32 = [name for name, cfg in runs if cfg is not None and not cfg.get("amp")]
+    if not amp and not fp32:
+        return None
+    if not amp:
+        return "*Training precision: fp32 for every run above.*"
+    parts = [f"mixed precision (AMP, fp16) for {', '.join(f'`{n}`' for n in amp)}"]
+    if fp32:
+        parts.append(f"fp32 for {', '.join(f'`{n}`' for n in fp32)}")
+    return f"*Training precision: {'; '.join(parts)}. Evaluation always runs in fp32.*"
+
+
 # ---------------------------------------------------------------- assemble
 
 def build_markdown(sections, figs, asset_prefix):
@@ -261,6 +281,8 @@ def build_markdown(sections, figs, asset_prefix):
         "### Leaf segmentation (U-Net, Apple classes)\n",
         sections["segmentation"], "", img("seg_samples.png"),
     ]
+    if sections.get("precision"):
+        md += [sections["precision"], ""]
     extras = [img(n) for n, _ in figs if n.startswith(("gan_", "gradcam_"))]
     if extras:
         md += ["### Sample outputs\n"] + extras
@@ -290,6 +312,7 @@ def run(args):
         "cross": cross_dataset_section(run_dir, assets, figs),
         "incremental": incremental_section(run_dir, assets, figs),
         "segmentation": segmentation_section(run_dir, assets, figs),
+        "precision": precision_note(run_dir),
     }
     samples_section(run_dir, assets, figs)
 

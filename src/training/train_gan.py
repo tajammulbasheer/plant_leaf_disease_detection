@@ -22,7 +22,7 @@ from tqdm import tqdm
 from src.models.gan import Generator, Discriminator, weights_init
 
 
-def build_loader(data_dir, image_size, batch_size):
+def build_loader(data_dir, image_size, batch_size, num_workers=2):
     """Loader over the images of ONE class folder.
 
     (An earlier version pointed ImageFolder at the parent directory, which
@@ -43,13 +43,13 @@ def build_loader(data_dir, image_size, batch_size):
         raise RuntimeError(f"Need at least {batch_size} images in {data_dir}, found {len(files)}.")
     print(f"Training GAN on {len(files)} images from {data_dir}")
     dataset = PathListDataset([(str(f), 0) for f in files], transform)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=2, drop_last=True)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
 
 
 def train(args):
     set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    loader = build_loader(args.data_dir, args.image_size, args.batch_size)
+    loader = build_loader(args.data_dir, args.image_size, args.batch_size, args.num_workers)
 
     netG = Generator(latent_dim=args.latent_dim).to(device)
     netD = Discriminator().to(device)
@@ -120,6 +120,7 @@ def parse_args():
     p.add_argument("--latent-dim", type=int, default=100)
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--sample-every", type=int, default=10)
+    p.add_argument("--num-workers", type=int, default=2)
     return p.parse_args()
 
 

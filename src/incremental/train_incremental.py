@@ -53,7 +53,7 @@ DEFAULT_TASK_ORDER = [
 CLASS_TO_IDX = {name: i for i, name in enumerate(APPLE_CLASSES)}
 
 
-def build_task_loader(data_dir, task_classes, image_size, batch_size, k_shot=None, train=True):
+def build_task_loader(data_dir, task_classes, image_size, batch_size, k_shot=None, train=True, num_workers=2):
     ds = AppleLeafDataset(
         root=f"{data_dir}/{'train' if train else 'val'}",
         transform=default_transforms(train=train, image_size=image_size),
@@ -61,7 +61,7 @@ def build_task_loader(data_dir, task_classes, image_size, batch_size, k_shot=Non
         class_to_idx=CLASS_TO_IDX,
         k_shot=k_shot,
     )
-    return DataLoader(ds, batch_size=batch_size, shuffle=train, num_workers=2), ds
+    return DataLoader(ds, batch_size=batch_size, shuffle=train, num_workers=num_workers), ds
 
 
 def sample_exemplars(dataset, n_per_class, seed=42):
@@ -78,11 +78,12 @@ def sample_exemplars(dataset, n_per_class, seed=42):
     return exemplars
 
 
-def evaluate_task(model, data_dir, task_classes, seen_classes, image_size, batch_size, device):
+def evaluate_task(model, data_dir, task_classes, seen_classes, image_size, batch_size, device, num_workers=2):
     """Accuracy on one task's val images, predicting only among the classes
     learned so far (standard class-incremental evaluation: the head has
     slots for future classes, but they must not be predictable yet)."""
-    loader, _ = build_task_loader(data_dir, task_classes, image_size, batch_size, train=False)
+    loader, _ = build_task_loader(data_dir, task_classes, image_size, batch_size, train=False,
+                                  num_workers=num_workers)
     seen_idx = torch.tensor([CLASS_TO_IDX[c] for c in seen_classes], device=device)
     model.eval()
     correct, total = 0, 0
@@ -104,6 +105,7 @@ def run_strategy(args, strategy: str):
     model = LeafClassifier(num_classes=len(APPLE_CLASSES), backbone=args.backbone).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     criterion = nn.CrossEntropyLoss()
+    scaler = torch.amp.GradScaler(device.type) if args.amp else None
 
     task_order = DEFAULT_TASK_ORDER
     num_tasks = len(task_order)
@@ -117,7 +119,8 @@ def run_strategy(args, strategy: str):
         k_shot = None if is_base_task else args.k_shot
 
         train_loader, train_ds = build_task_loader(
-            args.data_dir, task_classes, args.image_size, args.batch_size, k_shot=k_shot, train=True
+            args.data_dir, task_classes, args.image_size, args.batch_size, k_shot=k_shot, train=True,
+            num_workers=args.num_workers,
         )
 
         exemplar_loader = None
@@ -125,7 +128,8 @@ def run_strategy(args, strategy: str):
             exemplar_ds = PathListDataset(
                 exemplar_buffer, default_transforms(train=True, image_size=args.image_size)
             )
-            exemplar_loader = DataLoader(exemplar_ds, batch_size=args.batch_size, shuffle=True, num_workers=2)
+            exemplar_loader = DataLoader(exemplar_ds, batch_size=args.batch_size, shuffle=True,
+                                         num_workers=args.num_workers)
         # Fresh iterator for every task, so this task's replay draws from the
         # buffer as it now stands (including exemplars added after the
         # previous task). Previously the old iterator leaked across tasks.
@@ -142,7 +146,11 @@ def run_strategy(args, strategy: str):
             for images, labels in train_loader:
                 images, labels = images.to(device), labels.to(device)
                 optimizer.zero_grad()
-                logits = model(images)
+                # --amp: forward passes under fp16 autocast; losses are computed
+                # from fp32 logits. Without --amp this is a no-op context.
+                with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=args.amp):
+                    logits = model(images)
+                logits = logits.float()
                 loss = criterion(logits, labels)
 
                 # Exemplar replay + distillation: also train on a batch of old
@@ -155,11 +163,13 @@ def run_strategy(args, strategy: str):
                         ex_images, ex_labels = next(exemplar_iter)
                     ex_images, ex_labels = ex_images.to(device), ex_labels.to(device)
 
-                    ex_logits = model(ex_images)
+                    with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=args.amp):
+                        ex_logits = model(ex_images)
+                        with torch.no_grad():
+                            teacher_logits = teacher_model(ex_images)
+                    ex_logits, teacher_logits = ex_logits.float(), teacher_logits.float()
                     replay_ce = criterion(ex_logits, ex_labels)
 
-                    with torch.no_grad():
-                        teacher_logits = teacher_model(ex_images)
                     # Distill only over the classes the teacher actually knew.
                     oi = old_idx.to(device)
                     distill_loss = F.kl_div(
@@ -170,15 +180,20 @@ def run_strategy(args, strategy: str):
 
                     loss = loss + args.replay_weight * replay_ce + args.distill_weight * distill_loss
 
-                loss.backward()
-                optimizer.step()
+                if scaler is None:
+                    loss.backward()
+                    optimizer.step()
+                else:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
 
         # --- Evaluate on every task seen so far ---
         cumulative_classes = [c for t in task_order[: task_idx + 1] for c in t]
         for eval_idx in range(task_idx + 1):
             acc = evaluate_task(
                 model, args.data_dir, task_order[eval_idx], cumulative_classes,
-                args.image_size, args.batch_size, device,
+                args.image_size, args.batch_size, device, num_workers=args.num_workers,
             )
             accuracy_matrix[task_idx, eval_idx] = acc
         print(f"  Row {task_idx} accuracies: {accuracy_matrix[task_idx, :task_idx+1]}")
@@ -201,7 +216,8 @@ def run_strategy(args, strategy: str):
 
 
 def run(args):
-    results = {}
+    results = {"config": {"amp": args.amp, "k_shot": args.k_shot,
+                          "epochs_per_task": args.epochs_per_task}}
     for strategy in ["naive", "replay_distill"]:
         results[strategy] = run_strategy(args, strategy)
 
@@ -211,7 +227,8 @@ def run(args):
         json.dump(results, f, indent=2)
 
     print("\n=== Summary ===")
-    for strategy, r in results.items():
+    for strategy in ["naive", "replay_distill"]:
+        r = results[strategy]
         print(
             f"{strategy}: final_avg_acc={r['final_average_accuracy']:.4f} "
             f"avg_forgetting={r['average_forgetting']:.4f}"
@@ -234,6 +251,9 @@ def parse_args():
     p.add_argument("--replay-weight", type=float, default=1.0)
     p.add_argument("--distill-weight", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--num-workers", type=int, default=2)
+    p.add_argument("--amp", action="store_true",
+                   help="Mixed-precision (fp16 autocast + GradScaler) training steps; evaluation stays fp32")
     return p.parse_args()
 
 

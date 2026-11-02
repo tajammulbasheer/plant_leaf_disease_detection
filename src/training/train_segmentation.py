@@ -117,12 +117,13 @@ def train(args):
         dataset, [len(dataset) - val_len, val_len], generator=torch.Generator().manual_seed(42)
     )
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     model = UNet().to(device)
     bce = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    scaler = torch.amp.GradScaler(device.type) if args.amp else None
 
     best_val_loss = float("inf")
     best = {}
@@ -136,10 +137,20 @@ def train(args):
         for images, masks in tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}"):
             images, masks = images.to(device), masks.to(device)
             optimizer.zero_grad()
-            logits = model(images)
-            loss = bce(logits, masks) + dice_loss(logits, masks)
-            loss.backward()
-            optimizer.step()
+            if scaler is None:
+                logits = model(images)
+                loss = bce(logits, masks) + dice_loss(logits, masks)
+                loss.backward()
+                optimizer.step()
+            else:
+                with torch.autocast(device_type=device.type, dtype=torch.float16):
+                    logits = model(images)
+                # Loss in fp32: Dice sums over every pixel and can overflow fp16.
+                logits = logits.float()
+                loss = bce(logits, masks) + dice_loss(logits, masks)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
             running_loss += loss.item() * images.size(0)
 
         model.eval()
@@ -166,7 +177,8 @@ def train(args):
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best = {"epoch": epoch + 1, "val_iou": val_iou, "val_dice": val_dice,
-                    "val_loss": val_loss, "n_train": len(train_ds), "n_val": len(val_ds)}
+                    "val_loss": val_loss, "n_train": len(train_ds), "n_val": len(val_ds),
+                    "amp": args.amp}
             torch.save(model.state_dict(), out_dir / "unet_best.pt")
             (out_dir / "seg_results.json").write_text(json.dumps(best, indent=2))
 
@@ -185,6 +197,9 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--num-workers", type=int, default=2)
+    p.add_argument("--amp", action="store_true",
+                   help="Mixed-precision (fp16 autocast + GradScaler) training steps; validation stays fp32")
     return p.parse_args()
 
 
