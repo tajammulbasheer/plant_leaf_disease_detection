@@ -18,7 +18,9 @@ PlantDoc-Dataset/
 *.onnx
 /runs/
 /report/
+/logs/
 /wandb/
+*.log
 
 # Archives and scratch notebooks
 *.zip
@@ -28,6 +30,7 @@ Untitled*.ipynb
 kaggle.json
 .env
 
-# OS
+# OS (incl. Windows download markers created when copying files into WSL)
 .DS_Store
 Thumbs.db
+*:Zone.Identifier
