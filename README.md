@@ -15,9 +15,10 @@ Plus a U-Net leaf segmenter and a DCGAN for minority-class synthesis on the Appl
 ## Key findings
 
 - A standard EfficientNet-B0 reaches **99.9% accuracy** on PlantVillage, but the Apple-only version of the
-  same model drops to **51.7% accuracy (0.36 macro-F1)** on PlantDoc field photos. PlantVillage's uniform
-  lab backgrounds make in-distribution accuracy a poor guide to real-world performance.
-- With only **20 labeled images per class**, accuracy stays at **95.1%** across all 38 classes.
+  same model drops to **51.7% accuracy (0.38 macro-F1)** on PlantDoc field photos (only 29 test images).
+  PlantVillage's uniform lab backgrounds make in-distribution accuracy a poor guide to real-world performance.
+- With only **20 labeled images per class**, accuracy stays at **95.2%** across all 38 classes, and
+  pseudo-labeling the unlabeled images raises it to **97.4%**.
 - When new diseases are added sequentially, naive fine-tuning forgets almost everything it knew;
   exemplar replay + knowledge distillation substantially reduces that forgetting.
 
@@ -31,31 +32,60 @@ experiment outputs. Nothing here is typed by hand.
 
 | Mode | Labeled images / class | Val accuracy | Val macro-F1 | Epochs run |
 |------|------------------------|--------------|--------------|------------|
-| Full supervised | all | 0.9989 | 0.9986 | — |
-| Few-shot | 20 | 0.9510 | 0.9383 | — |
-| Semi-supervised | 20 + pseudo-labels | not run yet | — | — |
+| Full supervised | all | 0.9991 | 0.9989 | 20/20 |
+| Few-shot | 20 | 0.9517 | 0.9406 | 25/25 |
+| Semi-supervised | 20 + pseudo-labels | 0.9741 | 0.9728 | 25/25 |
+
+![Validation accuracy and macro-F1 by training mode](assets/classifier_modes.png)
+
+![Validation macro-F1 per epoch](assets/training_curves.png)
 
 ### Cross-dataset generalization (Apple classes, PlantVillage → PlantDoc)
 
 | Test set | Accuracy | Macro-F1 |
 |---|---|---|
 | PlantVillage (in-distribution) | 1.0000 | 1.0000 |
-| PlantDoc (field photos) | 0.5172 | 0.3606 |
+| PlantDoc (field photos) | 0.5172 | 0.3750 |
 
-Generalization gap: **0.483** accuracy, **0.639** macro-F1. *Black rot has no PlantDoc equivalent and is excluded.*
+Generalization gap: **0.483** accuracy, **0.625** macro-F1. *Note: 'Black_rot' has no PlantDoc equivalent and is excluded from this OOD eval.*
+
+![Accuracy drop from lab photos to real field photos](assets/cross_dataset.png)
+
+![confusion plantvillage](assets/confusion_plantvillage.png)
+
+![confusion plantdoc](assets/confusion_plantdoc.png)
 
 ### Class-incremental few-shot learning (Apple classes)
 
 | Strategy | Final avg. accuracy | Avg. forgetting (lower is better) |
 |---|---|---|
-| Naive fine-tuning | 0.3333 | 0.9066 |
-| Replay + distillation | 0.4505 | 0.5965 |
+| Naive fine-tuning | 0.3341 | 0.9989 |
+| Replay + distillation | 0.5173 | 0.4146 |
+
+![Final accuracy and forgetting for each strategy](assets/incremental.png)
+
+![Per-task accuracy matrix](assets/incremental_matrix.png)
 
 ### Leaf segmentation (U-Net, Apple classes)
 
-| Val IoU | Val Dice |
-|---|---|
-| not run yet | — |
+| Val IoU | Val Dice | Train / val images |
+|---|---|---|
+| 0.9771 | 0.9883 | 2854 / 317 |
+
+![U-Net leaf segmentation: input, ground truth, prediction](assets/seg_samples.png)
+
+*Training precision: fp32 for every run above.*
+
+### Sample outputs
+
+![DCGAN: real Cedar apple rust (top) vs generated (bottom)](assets/gan_real_vs_generated.png)
+
+![Grad-CAM heatmap and pseudo bounding box (sample_0_Apple_scab)](assets/gradcam_0.png)
+
+![Grad-CAM heatmap and pseudo bounding box (sample_10_Apple_scab)](assets/gradcam_1.png)
+
+![Grad-CAM heatmap and pseudo bounding box (sample_11_Apple_scab)](assets/gradcam_2.png)
+
 <!-- RESULTS:END -->
 
 ## Approach
