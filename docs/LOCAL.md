@@ -50,44 +50,48 @@ Note: `AMP=1` and a non-default `BATCH_SIZE` change how the models are trained, 
 strictly comparable with the Colab (fp32, default batch size) runs. `generate_report` records which runs
 used AMP under the results tables.
 
-## 3. Speed on an RTX A4000 (measured 2026-11-02)
+## 3. Speed on an RTX A4000 (measured 2026-11-03, idle GPU)
 
 `scripts/benchmark_amp.py` times real training steps on the prepared data (30 warm-up batches, then 100
-timed, default batch sizes, torch 2.14.1 + CUDA 13.0). **The GPU was shared** with another training/eval
-job during every measurement, so throughput varied a lot between repeats (4 runs):
+timed, default batch sizes, 8 workers, torch 2.14.1 + CUDA 13.0, driver 581.15). No other process was on
+the GPU. Ranges are over 5 repeats (3 GPU-step-only, 2 end-to-end with JPEG loading; both modes agreed
+within 4%, so data loading is not the bottleneck):
 
-| | fp32 | AMP | Peak GPU memory fp32 → AMP |
-|---|---|---|---|
-| Classifier (EfficientNet-B0, 224 px, batch 32) | 190–345 img/s | 298–434 img/s | 2839 → 1465 MiB (×0.52) |
-| U-Net (256 px, batch 8) | 45–61 img/s | 75–180 img/s | 1554 → 889 MiB (×0.57) |
+| | fp32 | AMP | AMP speed-up | Peak GPU memory fp32 → AMP |
+|---|---|---|---|---|
+| Classifier (EfficientNet-B0, 224 px, batch 32) | 415–433 img/s | 656–711 img/s | ×1.6–1.7 | 2839 → 1465 MiB (×0.52) |
+| U-Net (256 px, batch 8) | 106–111 img/s | 171–186 img/s | ×1.6–1.7 | 1554 → 889 MiB (×0.57) |
 
-The memory saving is exact and repeatable. The speed-up is **not reliably measured**: the spread between
-repeats is larger than the AMP effect. Re-measure on an idle GPU (`nvidia-smi` shows no other process):
+An earlier run on 2026-11-02, with another training job sharing the GPU, gave 190–345 (fp32) and
+298–434 (AMP) img/s for the classifier: a shared GPU can cost half the throughput or more.
+
+Re-measure (e.g. after a driver or torch upgrade) with nothing else on the GPU:
 
 ```bash
 .venv/bin/python scripts/benchmark_amp.py --data-dir ~/data/plantvillage            # GPU step only
 .venv/bin/python scripts/benchmark_amp.py --data-dir ~/data/plantvillage --mode loader  # incl. JPEG loading
 ```
 
-**Estimated** time per step, fp32, derived from the measured fp32 range above and the dataset sizes
-(43,429 / 10,876 train / val images; Apple 2,536 / 635; U-Net 2,854 / 317). Validation is assumed to run
-~3× faster than training (not measured). The DCGAN, Grad-CAM and PlantDoc steps were not benchmarked.
-These are estimates, not measurements:
+**Estimated** time per step on an idle A4000, derived from the measured throughput above and the dataset
+sizes (43,429 / 10,876 train / val images; Apple 2,536 / 635; U-Net 2,854 / 317). Validation is assumed
+to run ~3× faster than training (not measured). The DCGAN, Grad-CAM, PlantDoc and incremental steps were
+not benchmarked directly. These are estimates, not measurements:
 
-| Step | Work | Estimate |
-|---|---|---|
-| Data preparation | clone ~2 GB + copy 54k images | ~30 min here (download-bound, ~7 MB/s) |
-| Classifier, full | 20 epochs × 43k train + 11k val | 45–85 min |
-| Classifier, few-shot | 25 epochs × 760 train + 11k val | 5–10 min |
-| Classifier, semi-supervised | as few-shot + up to 2,000 pseudo-labels / epoch | 10–15 min |
-| Classifier, Apple-only | 15 epochs × 2.5k train | 2–4 min |
-| U-Net | 15 epochs × 2.9k images | 12–16 min |
-| DCGAN | 100 epochs × 220 images at 64 px | a few minutes (not measured) |
-| PlantDoc eval, Grad-CAM | inference on < 700 images | ~1 min each |
-| Class-incremental | 2 strategies × 3 tasks × 15 epochs (batch 16) | 5–10 min |
-| **Total** (data already prepared) | | **~1.5–2.5 h** |
+| Step | Work | fp32 (default) | `AMP=1` |
+|---|---|---|---|
+| Data preparation | clone ~2 GB + copy 54k images | ~30 min here (download-bound, ~7 MB/s) | same |
+| Classifier, full | 20 epochs × 43k train + 11k val | 35–40 min | 22–26 min |
+| Classifier, few-shot | 25 epochs × 760 train + 11k val | ~5 min | ~4 min |
+| Classifier, semi-supervised | as few-shot + up to 2,000 pseudo-labels / epoch | ~7 min | ~5 min |
+| Classifier, Apple-only | 15 epochs × 2.5k train | ~2 min | ~1.5 min |
+| U-Net | 15 epochs × 2.9k images | ~7 min | ~5 min |
+| DCGAN | 100 epochs × 220 images at 64 px | a few minutes | same (no AMP) |
+| PlantDoc eval, Grad-CAM | inference on < 700 images | ~1 min each | same |
+| Class-incremental | 2 strategies × 3 tasks × 15 epochs (batch 16) | 3–5 min | 2–4 min |
+| **Total** (data already prepared) | | **~1–1.25 h** | **~45–60 min** |
 
-On an idle GPU expect the lower end or better; with another job on the card, the upper end or worse.
+Each step also has a few seconds of start-up (model load, worker spawn). With another job on the GPU,
+expect up to 2× longer or worse.
 
 ## 4. Long runs in tmux
 
